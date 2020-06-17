@@ -17,6 +17,7 @@ class HalfPrecisionBenchmark:
         data = self._data
 
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
         # Warm up.
         for i in range(num_warmup_trials):
@@ -31,6 +32,7 @@ class HalfPrecisionBenchmark:
             input_cast_times = []
             output_cast_times = []
         for i in range(num_trials):
+            torch.cuda.synchronize()
             if half_precision:
                 start_time = time.time()
                 data = self._data.half()
@@ -116,7 +118,7 @@ def main(args):
         for benchmark in get_linear_benchmarks(batch_size):
             results = benchmark.profile(1, 5)
             if output_file is not None:
-                output_file.write('%s,%d,%f,%f,%f,%f\n' % (batch_size,
+                output_file.write('%d,%s,%f,%f,%f,%f\n' % (batch_size,
                                                            benchmark.params,
                                                            results[0],
                                                            results[1],

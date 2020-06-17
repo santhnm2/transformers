@@ -3,6 +3,7 @@ import torch
 
 import argparse
 import math
+import numpy as np
 import time
 import random
 
@@ -87,44 +88,46 @@ def train(args, model, train_loader, valid_loader):
 
 def _evaluate(args, model, valid_loader):
     num_correct = 0.0
+    per_batch_runtimes = []
     with torch.no_grad():
         for batch in valid_loader:
+            torch.cuda.synchronize()
+            start_time = time.time()
             outputs = model(input_ids=batch['input_ids'].to('cuda'),
                             attention_mask=batch['attention_mask'].to('cuda'))
             logits = outputs[0]
             predictions = torch.argmax(logits, dim=1)
             num_correct += batch['labels'].to('cuda').eq(predictions).sum()
-    return num_correct / len(valid_loader.dataset)
+            per_batch_runtimes.append(time.time() - start_time)
+    return num_correct.float() / len(valid_loader.dataset), per_batch_runtimes
 
 def evaluate(args, model, valid_loader, warm_up=False, profile=False):
-    torch.cuda.empty_cache()
+    if profile:
+        torch.cuda.empty_cache()
     if warm_up:
         _evaluate(args, model, valid_loader)
+    valid_acc, per_batch_runtimes = _evaluate(args, model, valid_loader)
     if profile:
-        start_time = time.time()
-    valid_acc = _evaluate(args, model, valid_loader)
-    if profile:
-        runtime = time.time() - start_time
-        return valid_acc, runtime
+        return valid_acc, per_batch_runtimes
     return valid_acc
 
 def cuda_profile(args, model, valid_loader):
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
     batch = next(iter(valid_loader))
     input_ids = batch['input_ids'].to('cuda')
     attention_mask = batch['attention_mask'].to('cuda')
-    torch.cuda.synchronize()
-    #with torch.autograd.profiler.profile(use_cuda=True, record_shapes=True) as prof:
-    with torch.cuda.profiler.profile():
-        with torch.no_grad():
-            # Warm-up.
+    with torch.no_grad():
+        # Warm-up.
+        outputs = model(input_ids=input_ids,
+                        attention_mask=attention_mask)
+        torch.cuda.synchronize()
+        with torch.autograd.profiler.profile(use_cuda=True, record_shapes=True) as prof:
             outputs = model(input_ids=input_ids,
                             attention_mask=attention_mask)
-            with torch.autograd.profiler.emit_nvtx():
-                outputs = model(input_ids=input_ids,
-                                attention_mask=attention_mask)
-    #print(prof)
-    import pdb
-    pdb.set_trace()
+    print(prof)
+    #import pdb
+    #pdb.set_trace()
 
 def cast_to_half_precision(model, verbose=False):
     stack = [(None, model, 'model', 1)]
@@ -209,7 +212,8 @@ def main(args):
     model.to('cuda')
 
     if args.half_precision:
-        cast_to_half_precision(model)
+        model.half()
+        # cast_to_half_precision(model)
 
     if args.encoder_blocks_to_skip is not None:
         skip_encoder_blocks(args, model)
@@ -225,15 +229,14 @@ def main(args):
                                 tokenizer=tokenizer,
                                 mode='dev',
                                 cache_dir='cache')
-    collator = DefaultDataCollator()
     train_loader = \
         torch.utils.data.DataLoader(train_dataset,
                                     batch_size=args.batch_size,
-                                    collate_fn=collator.collate_batch)
+                                    collate_fn=default_data_collator)
     valid_loader = \
         torch.utils.data.DataLoader(valid_dataset,
                                     batch_size=args.valid_batch_size,
-                                    collate_fn=collator.collate_batch)
+                                    collate_fn=default_data_collator)
     num_validation_steps = \
         math.ceil(len(valid_dataset) / args.valid_batch_size)
 
@@ -245,13 +248,13 @@ def main(args):
             print('===> Saving to checkpoint...')
             model.save_pretrained(args.checkpoint_dir)
 
-    cuda_profile(args, model, valid_loader)
-    """
-    valid_acc, runtime = evaluate(args, model, valid_loader, warm_up=True,
-                                 profile=True)
+    #cuda_profile(args, model, valid_loader)
+    valid_acc, per_batch_runtimes = \
+        evaluate(args, model, valid_loader, warm_up=True, profile=True)
     print('===> Validation accuracy: %.2f%%' % (valid_acc * 100.0))
-    print('===> Runtime: %.3f seconds' % (runtime))
-    """
+    print('===> Average per-batch runtime: '
+          '%.5f seconds' % (np.mean(per_batch_runtimes)))
+    print('===> Total runtime: %.5f seconds' % (sum(per_batch_runtimes)))
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser(
@@ -283,7 +286,7 @@ if __name__=='__main__':
                         help='Number of warmup validation rounds to run')
     parser.add_argument('--data_dir', type=str, default='glue_data/MRPC',
                         help='MRPC data dir')
-    parser.add_argument('--print_freq', type=int, default=100,
+    parser.add_argument('--print_freq', type=int, default=5,
                         help='Print frequency for training')
     parser.add_argument('--half_precision', action='store_true', default=False,
                         help='If set, cast all layers to half precision')
