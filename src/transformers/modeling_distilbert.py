@@ -99,9 +99,10 @@ class Embeddings(nn.Module):
 
 
 class MultiHeadSelfAttention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_num):
         super().__init__()
 
+        self.layer_num = layer_num
         self.n_heads = config.n_heads
         self.dim = config.dim
         self.dropout = nn.Dropout(p=config.attention_dropout)
@@ -130,7 +131,8 @@ class MultiHeadSelfAttention(nn.Module):
         self.dim = attention_head_size * self.n_heads
         self.pruned_heads = self.pruned_heads.union(heads)
 
-    def forward(self, query, key, value, mask, head_mask=None, output_attentions=False):
+    def forward(self, query, key, value, mask, head_mask=None, output_attentions=False,
+                linformer=None):
         """
         Parameters
         ----------
@@ -172,6 +174,12 @@ class MultiHeadSelfAttention(nn.Module):
         mask = (mask == 0).view(mask_reshp).expand_as(scores)  # (bs, n_heads, q_length, k_length)
         scores.masked_fill_(mask, -float("inf"))  # (bs, n_heads, q_length, k_length)
 
+        if linformer[self.layer_num] is not None:
+            scores = torch.einsum('bhnd,nk->bhdk', scores,
+                             linformer[self.layer_num]['e'])
+            v = torch.einsum('bhnd,nk->bhkd', v,
+                             linformer[self.layer_num]['f'])
+
         weights = nn.Softmax(dim=-1)(scores)  # (bs, n_heads, q_length, k_length)
         weights = self.dropout(weights)  # (bs, n_heads, q_length, k_length)
 
@@ -180,6 +188,11 @@ class MultiHeadSelfAttention(nn.Module):
             weights = weights * head_mask
 
         context = torch.matmul(weights, v)  # (bs, n_heads, q_length, dim_per_head)
+        """
+        self.context_val = context
+        if self.training:
+            self.context_val.retain_grad()
+        """
         context = unshape(context)  # (bs, q_length, dim)
         context = self.out_lin(context)  # (bs, q_length, dim)
 
@@ -209,18 +222,18 @@ class FFN(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_num):
         super().__init__()
 
         assert config.dim % config.n_heads == 0
 
-        self.attention = MultiHeadSelfAttention(config)
+        self.attention = MultiHeadSelfAttention(config, layer_num)
         self.sa_layer_norm = nn.LayerNorm(normalized_shape=config.dim, eps=1e-12)
 
         self.ffn = FFN(config)
         self.output_layer_norm = nn.LayerNorm(normalized_shape=config.dim, eps=1e-12)
 
-    def forward(self, x, attn_mask=None, head_mask=None, output_attentions=False):
+    def forward(self, x, attn_mask=None, head_mask=None, output_attentions=False, linformer=None):
         """
         Parameters
         ----------
@@ -237,6 +250,7 @@ class TransformerBlock(nn.Module):
         # Self-Attention
         sa_output = self.attention(
             query=x, key=x, value=x, mask=attn_mask, head_mask=head_mask, output_attentions=output_attentions,
+            linformer=linformer,
         )
         if output_attentions:
             sa_output, sa_weights = sa_output  # (bs, seq_length, dim), (bs, n_heads, seq_length, seq_length)
@@ -261,10 +275,9 @@ class Transformer(nn.Module):
         self.n_layers = config.n_layers
         self.output_hidden_states = config.output_hidden_states
 
-        layer = TransformerBlock(config)
-        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.n_layers)])
+        self.layer = nn.ModuleList([TransformerBlock(config, i) for i in range(config.n_layers)])
 
-    def forward(self, x, attn_mask=None, head_mask=None, output_attentions=False):
+    def forward(self, x, attn_mask=None, head_mask=None, output_attentions=False, linformer=None):
         """
         Parameters
         ----------
@@ -293,10 +306,12 @@ class Transformer(nn.Module):
                 all_hidden_states = all_hidden_states + (hidden_state,)
 
             layer_outputs = layer_module(
-                x=hidden_state, attn_mask=attn_mask, head_mask=head_mask[i], output_attentions=output_attentions
+                x=hidden_state, attn_mask=attn_mask, head_mask=head_mask[i], output_attentions=output_attentions,
+                linformer=linformer,
             )
+            new_hidden_state = layer_outputs[-1]
+            # print('Block %d: norm of delta=%f' % (i, torch.norm(new_hidden_state - hidden_state, p=2)))
             hidden_state = layer_outputs[-1]
-
             if output_attentions:
                 assert len(layer_outputs) == 2
                 attentions = layer_outputs[0]
@@ -412,6 +427,7 @@ class DistilBertModel(DistilBertPreTrainedModel):
     @add_start_docstrings_to_callable(DISTILBERT_INPUTS_DOCSTRING)
     def forward(
         self, input_ids=None, attention_mask=None, head_mask=None, inputs_embeds=None, output_attentions=None,
+        linformer=None,
     ):
         r"""
     Return:
@@ -467,6 +483,7 @@ class DistilBertModel(DistilBertPreTrainedModel):
             inputs_embeds = self.embeddings(input_ids)  # (bs, seq_length, dim)
         tfmr_output = self.transformer(
             x=inputs_embeds, attn_mask=attention_mask, head_mask=head_mask, output_attentions=output_attentions,
+            linformer=linformer,
         )
         hidden_state = tfmr_output[0]
         output = (hidden_state,) + tfmr_output[1:]
@@ -599,6 +616,7 @@ class DistilBertForSequenceClassification(DistilBertPreTrainedModel):
         inputs_embeds=None,
         labels=None,
         output_attentions=None,
+        linformer=None,
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`, defaults to :obj:`None`):
@@ -644,6 +662,7 @@ class DistilBertForSequenceClassification(DistilBertPreTrainedModel):
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
             output_attentions=output_attentions,
+            linformer=linformer,
         )
         hidden_state = distilbert_output[0]  # (bs, seq_len, dim)
         pooled_output = hidden_state[:, 0]  # (bs, dim)

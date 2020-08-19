@@ -183,7 +183,7 @@ class BertEmbeddings(nn.Module):
 
 
 class BertSelfAttention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_num):
         super().__init__()
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
             raise ValueError(
@@ -191,6 +191,7 @@ class BertSelfAttention(nn.Module):
                 "heads (%d)" % (config.hidden_size, config.num_attention_heads)
             )
 
+        self.layer_num = layer_num
         self.num_attention_heads = config.num_attention_heads
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
@@ -214,6 +215,7 @@ class BertSelfAttention(nn.Module):
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         output_attentions=False,
+        linformer=None,
     ):
         mixed_query_layer = self.query(hidden_states)
 
@@ -238,6 +240,12 @@ class BertSelfAttention(nn.Module):
         if attention_mask is not None:
             # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
             attention_scores = attention_scores + attention_mask
+
+        if linformer[self.layer_num] is not None:
+            attention_scores = torch.einsum('bhnn,nk->bhnk', attention_scores,
+                                            linformer[self.layer_num]['e'])
+            value_layer = torch.einsum('bhnd,nk->bhkd', value_layer,
+                                       linformer[self.layer_num]['f'])
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.Softmax(dim=-1)(attention_scores)
@@ -275,9 +283,10 @@ class BertSelfOutput(nn.Module):
 
 
 class BertAttention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_num):
         super().__init__()
-        self.self = BertSelfAttention(config)
+        self.layer_num = layer_num
+        self.self = BertSelfAttention(config, layer_num)
         self.output = BertSelfOutput(config)
         self.pruned_heads = set()
 
@@ -307,9 +316,11 @@ class BertAttention(nn.Module):
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         output_attentions=False,
+        linformer=None,
     ):
         self_outputs = self.self(
             hidden_states, attention_mask, head_mask, encoder_hidden_states, encoder_attention_mask, output_attentions,
+            linformer=linformer,
         )
         attention_output = self.output(self_outputs[0], hidden_states)
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
@@ -346,9 +357,10 @@ class BertOutput(nn.Module):
 
 
 class BertLayer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_num):
         super().__init__()
-        self.attention = BertAttention(config)
+        self.layer_num = layer_num
+        self.attention = BertAttention(config, layer_num)
         self.is_decoder = config.is_decoder
         if self.is_decoder:
             self.crossattention = BertAttention(config)
@@ -363,9 +375,11 @@ class BertLayer(nn.Module):
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         output_attentions=False,
+        linformer=None,
     ):
         self_attention_outputs = self.attention(
             hidden_states, attention_mask, head_mask, output_attentions=output_attentions,
+            linformer=linformer,
         )
         attention_output = self_attention_outputs[0]
         outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
@@ -378,6 +392,7 @@ class BertLayer(nn.Module):
                 encoder_hidden_states,
                 encoder_attention_mask,
                 output_attentions,
+                linfomrer_k=linformer,
             )
             attention_output = cross_attention_outputs[0]
             outputs = outputs + cross_attention_outputs[1:]  # add cross attentions if we output attention weights
@@ -392,7 +407,7 @@ class BertEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.output_hidden_states = config.output_hidden_states
-        self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layer = nn.ModuleList([BertLayer(config, i) for i in range(config.num_hidden_layers)])
 
     def forward(
         self,
@@ -402,6 +417,7 @@ class BertEncoder(nn.Module):
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         output_attentions=False,
+        linformer=None,
     ):
         all_hidden_states = ()
         all_attentions = ()
@@ -416,6 +432,7 @@ class BertEncoder(nn.Module):
                 encoder_hidden_states,
                 encoder_attention_mask,
                 output_attentions,
+                linformer=linformer,
             )
             hidden_states = layer_outputs[0]
 
@@ -656,6 +673,7 @@ class BertModel(BertPreTrainedModel):
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         output_attentions=None,
+        linformer=None,
     ):
         r"""
     Return:
@@ -747,6 +765,7 @@ class BertModel(BertPreTrainedModel):
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_extended_attention_mask,
             output_attentions=output_attentions,
+            linformer=linformer,
         )
         sequence_output = encoder_outputs[0]
         pooled_output = self.pooler(sequence_output)
@@ -1218,6 +1237,7 @@ class BertForSequenceClassification(BertPreTrainedModel):
         inputs_embeds=None,
         labels=None,
         output_attentions=None,
+        linformer=None,
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`, defaults to :obj:`None`):
@@ -1268,6 +1288,7 @@ class BertForSequenceClassification(BertPreTrainedModel):
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
             output_attentions=output_attentions,
+            linformer=linformer,
         )
 
         pooled_output = outputs[1]

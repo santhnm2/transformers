@@ -9,7 +9,7 @@ import random
 
 def train(args, model, train_loader, valid_loader, linformer=None):
     criterion = torch.nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=3e-5, eps=1e-8)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-8)
     for epoch in range(args.epochs):
         running_loss = 0.0
         for i, batch in enumerate(train_loader):
@@ -30,17 +30,19 @@ def train(args, model, train_loader, valid_loader, linformer=None):
             done = i == len(train_loader) - 1
             if done or (i+1) % args.print_freq == 0:
                 running_loss /= args.print_freq
-                valid_acc = evaluate(args, model, valid_loader,
-                                     linformer=linformer)
+                valid_acc, valid_loss = evaluate(args, model, valid_loader,
+                                                 linformer=linformer)
                 print('===> Epoch %d, Iteration %d: '
-                      'loss=%.3f, valid_acc=%.2f' % (epoch+1, i+1,
-                                                    running_loss,
-                                                    valid_acc))
+                      'train_loss=%.3f, valid_loss=%.3f, '
+                      'valid_acc=%.2f' % (epoch+1, i+1, running_loss,
+                                          valid_loss, valid_acc))
                 running_loss = 0.0
 
 def _evaluate(args, model, valid_loader, linformer=None):
     all_correct = []
     per_batch_runtimes = []
+    criterion = torch.nn.BCEWithLogitsLoss()
+    running_loss = 0.0
     with torch.no_grad():
         for i, batch in enumerate(valid_loader):
             torch.cuda.synchronize()
@@ -50,12 +52,18 @@ def _evaluate(args, model, valid_loader, linformer=None):
                             linformer=linformer)
             per_batch_runtimes.append(time.time() - start_time)
             logits = outputs[0]
+            one_hot_labels = \
+                torch.cuda.FloatTensor(batch['labels'].size(0), 2).zero_()
+            one_hot_labels.scatter_(1, batch['labels'].to('cuda').unsqueeze(1), 1)
+            loss = criterion(logits, one_hot_labels)
+            running_loss += loss.item()
             predictions = torch.argmax(logits, dim=1)
             correct = batch['labels'].to('cuda').eq(predictions).nonzero()
             correct += (valid_loader.batch_size * i)
             all_correct += correct.flatten().tolist()
     acc = float(len(all_correct)) / len(valid_loader.dataset)
-    return acc, all_correct, per_batch_runtimes
+    loss = running_loss / i
+    return acc, loss, all_correct, per_batch_runtimes
 
 def evaluate(args, model, valid_loader, warm_up=False, profile=False,
              linformer=None):
@@ -64,11 +72,11 @@ def evaluate(args, model, valid_loader, warm_up=False, profile=False,
         torch.cuda.empty_cache()
     if warm_up:
         _evaluate(args, model, valid_loader, linformer=linformer)
-    valid_acc, all_correct, per_batch_runtimes = \
+    valid_acc, valid_loss, all_correct, per_batch_runtimes = \
         _evaluate(args, model, valid_loader, linformer=linformer)
     if profile:
-        return valid_acc, all_correct, per_batch_runtimes
-    return valid_acc
+        return valid_acc, valid_loss, all_correct, per_batch_runtimes
+    return valid_acc, valid_loss
 
 def cuda_profile(args, model, valid_loader):
     model.eval()
@@ -87,14 +95,16 @@ def cuda_profile(args, model, valid_loader):
                             attention_mask=attention_mask)
     print(prof)
 
-def get_linformer(args, model):
+def get_linformer(args, model, seq_len):
     linformer = {}
-    # TODO: Make this command line argument
-    share_linformer = False
+    if args.linformer_blocks == 'all':
+        linformer_blocks = \
+            set(list(range(6 if args.model == 'distilbert' else 12)))
+    else:
+        linformer_blocks = \
+            set([int(x) for x in args.linformer_blocks.split(',')])
     if args.linformer_k is not None:
-        batch = next(iter(valid_loader))
-        seq_len = batch['input_ids'].shape[-1]
-        if share_linformer:
+        if args.share_linformer:
             e = torch.normal(mean=0,
                              std=(1.0 / np.sqrt(args.linformer_k)),
                              size=(seq_len, args.linformer_k)).cuda()
@@ -102,11 +112,11 @@ def get_linformer(args, model):
                              std=(1.0 / np.sqrt(args.linformer_k)),
                              size=(seq_len, args.linformer_k)).cuda()
         for i in range(6 if args.model == 'distilbert' else 12):
-            if i != 0:
+            if i not in linformer_blocks:
                 linformer[i] = None
                 continue
             linformer[i] = {}
-            if share_linformer:
+            if args.share_linformer:
                 linformer[i]['e'] = e
                 linformer[i]['f'] = f
             else:
@@ -126,11 +136,17 @@ def get_linformer(args, model):
 def main(args):
     if args.model == 'bert':
         tokenizer = BertTokenizer.from_pretrained('bert-base-cased',
-                                                  cache_dir=args.cache_dir)
+                                                  cache_dir=args.cache_dir,
+                                                  max_length=args.max_seq_length,
+                                                  truncation=True,
+                                                  padding=True)
     elif args.model == 'distilbert':
         tokenizer = \
             DistilBertTokenizer.from_pretrained('distilbert-base-cased',
-                                                cache_dir=args.cache_dir)
+                                                cache_dir=args.cache_dir,
+                                                max_length=args.max_seq_length,
+                                                truncation=True,
+                                                padding=True)
     if args.load_from_checkpoint:
         if args.checkpoint_dir is None:
             raise ValueError('No checkpoint dir specified!')
@@ -150,9 +166,14 @@ def main(args):
                                                                     cache_dir=args.cache_dir)
     model.to('cuda')
 
-    glue_data_training_args = \
-        GlueDataTrainingArguments(task_name='MRPC',
-                                  data_dir=args.data_dir)
+    if args.task == 'mrpc':
+        glue_data_training_args = \
+            GlueDataTrainingArguments(task_name='MRPC',
+                                      data_dir=args.data_dir,
+                                      max_seq_length=args.max_seq_length)
+    else:
+        raise NotImplementedError(args.task)
+
     train_dataset = GlueDataset(args=glue_data_training_args,
                                 tokenizer=tokenizer,
                                 mode='train',
@@ -172,7 +193,7 @@ def main(args):
     num_validation_steps = \
         math.ceil(len(valid_dataset) / args.valid_batch_size)
 
-    linformer = get_linformer(args, model)
+    linformer = get_linformer(args, model, args.max_seq_length)
 
     if not args.eval:
         train(args, model, train_loader, valid_loader, linformer=linformer)
@@ -182,7 +203,7 @@ def main(args):
             print('===> Saving to checkpoint...')
             model.save_pretrained(args.checkpoint_dir)
 
-    valid_acc, all_correct, per_batch_runtimes = \
+    valid_acc, valid_loss, all_correct, per_batch_runtimes = \
         evaluate(args, model, valid_loader, warm_up=True, profile=True,
                  linformer=linformer)
     if args.print_correct:
@@ -190,9 +211,10 @@ def main(args):
         print('===> Correct examples:', ' '.join([str(x) for x in all_correct]))
         print('===> Incorrect examples:',
               ' '.join([str(x) for x in incorrect]))
+    print('===> Validation loss: %.3f' % (valid_loss))
     print('===> Validation accuracy: %.2f%%' % (valid_acc * 100.0))
     print('===> Median per-batch runtime: '
-          '%.5f seconds' % (np.median(per_batch_runtimes)))
+          '%.5f ms' % (1000 * np.median(per_batch_runtimes)))
     print('===> Total runtime: %.5f seconds' % (sum(per_batch_runtimes)))
 
 if __name__=='__main__':
@@ -200,7 +222,10 @@ if __name__=='__main__':
         description='Approximate HuggingFace (Distil)Bert')
     parser.add_argument('--model', choices=['bert', 'distilbert'],
                         required=True, help='Model to run')
-    parser.add_argument('--task', choices=['sequence_classification'])
+    parser.add_argument('--task', required=True, type=str,
+                        choices=['cola', 'mrpc', 'sst-2', 'qqp', 'qnli', 'rte',
+                                 'wnli'],
+                        help='GLUE task')
     parser.add_argument('--cache_dir', type=str, default='/lfs/1/keshav2/.cache/',
                         help='Cache directory')
     parser.add_argument('--load_from_checkpoint', action='store_true',
@@ -228,7 +253,16 @@ if __name__=='__main__':
                         help='Print frequency for training')
     parser.add_argument('--linformer_k', type=int, default=None,
                         help='Linformer k parameter')
+    parser.add_argument('--share_linformer', action='store_true',
+                        default=False,
+                        help=('If set, share Linfomrer projection matrices '
+                              'across attention blocks'))
+    parser.add_argument('--linformer_blocks', type=str, default='all',
+                        help='List of attention blocks to apply Linformer to')
+    parser.add_argument('--lr', type=float, default=3e-5, help='Learning rate')
     parser.add_argument('--print_correct', action='store_true',
                         default=False, help='If set, print correct examples')
+    parser.add_argument('--max_seq_length', type=int, default=128,
+                        help='Maximum sequence length')
     args = parser.parse_args()
     main(args)
