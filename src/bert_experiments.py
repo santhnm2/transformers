@@ -4,8 +4,9 @@ import torch
 import argparse
 import math
 import numpy as np
-import time
+import os
 import random
+import time
 
 def train(args, model, train_loader, valid_loader, linformer=None):
     criterion = torch.nn.BCEWithLogitsLoss()
@@ -33,10 +34,13 @@ def train(args, model, train_loader, valid_loader, linformer=None):
                 valid_acc, valid_loss = evaluate(args, model, valid_loader,
                                                  linformer=linformer)
                 print('===> Epoch %d, Iteration %d: '
-                      'train_loss=%.3f, valid_loss=%.3f, '
-                      'valid_acc=%.2f' % (epoch+1, i+1, running_loss,
+                      'train_loss=%.4f, valid_loss=%.4f, '
+                      'valid_acc=%.4f' % (epoch+1, i+1, running_loss,
                                           valid_loss, valid_acc))
                 running_loss = 0.0
+                if (args.valid_acc_target is not None and
+                    valid_acc >= args.valid_acc_target):
+                    return
 
 def _evaluate(args, model, valid_loader, linformer=None):
     all_correct = []
@@ -134,6 +138,15 @@ def get_linformer(args, model, seq_len):
     return linformer
 
 def main(args):
+    if args.checkpoint_dir is not None:
+        if not os.path.isdir(args.checkpoint_dir):
+            raise ValueError(
+                'Invalid checkpoint dir "%s"' % (args.checkpoint_dir))
+        checkpoint_dir = os.path.join(args.checkpoint_dir,
+                                      'model=%s_task=%s' % (args.model,
+                                                            args.task))
+        if not os.path.isdir(checkpoint_dir):
+            os.mkdir(checkpoint_dir)
     if args.model == 'bert':
         tokenizer = BertTokenizer.from_pretrained('bert-base-cased',
                                                   cache_dir=args.cache_dir,
@@ -152,9 +165,9 @@ def main(args):
             raise ValueError('No checkpoint dir specified!')
         print('===> Loading from checkpoint...')
         if args.model == 'bert':
-            model = BertForSequenceClassification.from_pretrained(args.checkpoint_dir)
+            model = BertForSequenceClassification.from_pretrained(checkpoint_dir)
         elif args.model == 'distilbert':
-            model = DistilBertForSequenceClassification.from_pretrained(args.checkpoint_dir)
+            model = DistilBertForSequenceClassification.from_pretrained(checkpoint_dir)
     else:
         if args.model == 'bert':
             model = \
@@ -167,13 +180,20 @@ def main(args):
     model.to('cuda')
 
     if args.task == 'mrpc':
-        glue_data_training_args = \
-            GlueDataTrainingArguments(task_name='MRPC',
-                                      data_dir=args.data_dir,
-                                      max_seq_length=args.max_seq_length)
+        task_name = 'MRPC'
+    elif args.task == 'sst-2':
+        task_name = 'SST-2'
+    elif args.task == 'qnli':
+        task_name = 'QNLI'
+    elif args.task == 'qqp':
+        task_name = 'QQP'
     else:
         raise NotImplementedError(args.task)
-
+    data_dir = os.path.join(args.data_dir, task_name)
+    glue_data_training_args = \
+        GlueDataTrainingArguments(task_name=task_name,
+                                  data_dir=data_dir,
+                                  max_seq_length=args.max_seq_length)
     train_dataset = GlueDataset(args=glue_data_training_args,
                                 tokenizer=tokenizer,
                                 mode='train',
@@ -201,7 +221,7 @@ def main(args):
             if args.checkpoint_dir is None:
                 raise ValueError('No checkpoint dir specified!')
             print('===> Saving to checkpoint...')
-            model.save_pretrained(args.checkpoint_dir)
+            model.save_pretrained(checkpoint_dir)
 
     valid_acc, valid_loss, all_correct, per_batch_runtimes = \
         evaluate(args, model, valid_loader, warm_up=True, profile=True,
@@ -235,7 +255,7 @@ if __name__=='__main__':
                         default=False,
                         help='If set, save model to checkpoint')
     parser.add_argument('--checkpoint_dir', type=str,
-                        default='/lfs/1/keshav2/checkpoints',
+                        default='/lfs/1/keshav2/bert_checkpoints',
                         help='Checkpoint directory')
     parser.add_argument('--eval', action='store_true', default=False,
                         help='If set, only run evaluation on validation set')
@@ -247,8 +267,8 @@ if __name__=='__main__':
                         help='Validation batch size')
     parser.add_argument('--num_warmup_evals', type=int, default=0,
                         help='Number of warmup validation rounds to run')
-    parser.add_argument('--data_dir', type=str, default='glue_data/MRPC',
-                        help='MRPC data dir')
+    parser.add_argument('--data_dir', type=str, default='/lfs/1/keshav2/data/glue/',
+                        help='GLUE data dir')
     parser.add_argument('--print_freq', type=int, default=5,
                         help='Print frequency for training')
     parser.add_argument('--linformer_k', type=int, default=None,
@@ -264,5 +284,7 @@ if __name__=='__main__':
                         default=False, help='If set, print correct examples')
     parser.add_argument('--max_seq_length', type=int, default=128,
                         help='Maximum sequence length')
+    parser.add_argument('--valid_acc_target', type=float, default=None,
+                        help='If set, break if validation accuracy hits target')
     args = parser.parse_args()
     main(args)

@@ -172,11 +172,11 @@ class MultiHeadSelfAttention(nn.Module):
         q = q / math.sqrt(dim_per_head)  # (bs, n_heads, q_length, dim_per_head)
         scores = torch.matmul(q, k.transpose(2, 3))  # (bs, n_heads, q_length, k_length)
         mask = (mask == 0).view(mask_reshp).expand_as(scores)  # (bs, n_heads, q_length, k_length)
-        scores.masked_fill_(mask, -float("inf"))  # (bs, n_heads, q_length, k_length)
+        scores.masked_fill_(mask, -(1e10))  # (bs, n_heads, q_length, k_length)
 
         if linformer[self.layer_num] is not None:
             scores = torch.einsum('bhnd,nk->bhdk', scores,
-                             linformer[self.layer_num]['e'])
+                                  linformer[self.layer_num]['e'])
             v = torch.einsum('bhnd,nk->bhkd', v,
                              linformer[self.layer_num]['f'])
 
