@@ -100,6 +100,7 @@ def cuda_profile(args, model, valid_loader):
     print(prof)
 
 def get_linformer(args, model, seq_len):
+    """Generates the projection matrices for Linformer."""
     linformer = {}
     if args.linformer_blocks == 'all':
         linformer_blocks = \

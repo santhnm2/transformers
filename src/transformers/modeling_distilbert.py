@@ -175,10 +175,10 @@ class MultiHeadSelfAttention(nn.Module):
         scores.masked_fill_(mask, -(1e10))  # (bs, n_heads, q_length, k_length)
 
         if linformer[self.layer_num] is not None:
-            scores = torch.einsum('bhnd,nk->bhdk', scores,
-                                  linformer[self.layer_num]['e'])
-            v = torch.einsum('bhnd,nk->bhkd', v,
-                             linformer[self.layer_num]['f'])
+            e = linformer[self.layer_num]['e']
+            f = linformer[self.layer_num]['f']
+            scores = torch.einsum('bhnd,nk->bhnk', scores, e)
+            v = torch.einsum('bhnd,nk->bhkd', v, f)
 
         weights = nn.Softmax(dim=-1)(scores)  # (bs, n_heads, q_length, k_length)
         weights = self.dropout(weights)  # (bs, n_heads, q_length, k_length)
