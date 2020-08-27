@@ -27,7 +27,8 @@ def run_experiment(model, task, epochs, valid_acc_target,
                                                                model, task,
                                                                epochs, lr)
     command = '%s --load_from_checkpoint --valid_acc_target %f' % (command, valid_acc_target)
-    command = '%s --batch_size 64' % (command)
+    command = '%s --batch_size 16' % (command)
+    command = '%s --max_seq_length 512' % (command)
     if blocks is not None:
         blocks_str = ','.join([str(block) for block in blocks])
         command = '%s --linformer_k %d --linformer_blocks %s' % (command,
@@ -46,12 +47,12 @@ def run_experiment(model, task, epochs, valid_acc_target,
 
 def main():
     base_logdir = '/lfs/1/keshav2/logs/linformer'
-    epochs = 2
-    num_gpus = 4
+    epochs = 1
+    num_gpus = 1
     pool = ThreadPool(num_gpus)
 
     valid_acc_targets = {
-        'mrpc': 0.94,
+        'mrpc': 0.8456,
         'sst-2': 0.9128,
     }
 
@@ -60,18 +61,18 @@ def main():
         model_logdir = os.path.join(base_logdir, 'model=%s' % (model))
         if not os.path.isdir(model_logdir):
             os.mkdir(model_logdir)
-        for task in ['sst-2']:
+        for task in ['mrpc']:
             task_logdir = os.path.join(model_logdir, 'task=%s' % (task))
             if not os.path.isdir(task_logdir):
                 os.mkdir(task_logdir)
-            for target_delta in [0, 0.0025, 0.05]:
+            for target_delta in [0.01, 0.005, 0]:
                 valid_acc_target = valid_acc_targets[task] - target_delta
                 valid_acc_target_logdir = \
                     os.path.join(task_logdir,
                                  'valid_acc_target=%.4f' % (valid_acc_target))
                 if not os.path.isdir(valid_acc_target_logdir):
                     os.mkdir(valid_acc_target_logdir)
-                for k in [128]:
+                for k in [256, 128, 64]:
                     k_logdir = \
                         os.path.join(valid_acc_target_logdir, 'k=%d' % (k))
                     if not os.path.isdir(k_logdir):
