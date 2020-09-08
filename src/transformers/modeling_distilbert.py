@@ -169,17 +169,18 @@ class MultiHeadSelfAttention(nn.Module):
         k = shape(self.k_lin(key))  # (bs, n_heads, k_length, dim_per_head)
         v = shape(self.v_lin(value))  # (bs, n_heads, k_length, dim_per_head)
 
+        if linformer[self.layer_num] is not None:
+            e = linformer[self.layer_num]['e']
+            f = linformer[self.layer_num]['f']
+            v = torch.einsum('bhnd,nk->bhkd', v, f)
+            k = torch.einsum('bhnd,nk->bhkd', k, e)
+            mask = mask[:, :e.shape[-1]]
+            mask_reshp = (bs, 1, 1, e.shape[-1])
+
         q = q / math.sqrt(dim_per_head)  # (bs, n_heads, q_length, dim_per_head)
         scores = torch.matmul(q, k.transpose(2, 3))  # (bs, n_heads, q_length, k_length)
         mask = (mask == 0).view(mask_reshp).expand_as(scores)  # (bs, n_heads, q_length, k_length)
         scores.masked_fill_(mask, -(1e10))  # (bs, n_heads, q_length, k_length)
-
-        if linformer[self.layer_num] is not None:
-            e = linformer[self.layer_num]['e']
-            f = linformer[self.layer_num]['f']
-            scores = torch.einsum('bhnd,nk->bhnk', scores, e)
-            v = torch.einsum('bhnd,nk->bhkd', v, f)
-
         weights = nn.Softmax(dim=-1)(scores)  # (bs, n_heads, q_length, k_length)
         weights = self.dropout(weights)  # (bs, n_heads, q_length, k_length)
 

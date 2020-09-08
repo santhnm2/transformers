@@ -313,6 +313,7 @@ class RobertaForSequenceClassification(BertPreTrainedModel):
         inputs_embeds=None,
         labels=None,
         output_attentions=None,
+        linformer=None,
     ):
         r"""
         labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`, defaults to :obj:`None`):
@@ -360,6 +361,7 @@ class RobertaForSequenceClassification(BertPreTrainedModel):
             head_mask=head_mask,
             inputs_embeds=inputs_embeds,
             output_attentions=output_attentions,
+            linformer=linformer,
         )
         sequence_output = outputs[0]
         logits = self.classifier(sequence_output)

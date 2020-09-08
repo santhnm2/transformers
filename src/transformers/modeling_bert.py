@@ -234,6 +234,13 @@ class BertSelfAttention(nn.Module):
         key_layer = self.transpose_for_scores(mixed_key_layer)
         value_layer = self.transpose_for_scores(mixed_value_layer)
 
+        if linformer[self.layer_num] is not None:
+            e = linformer[self.layer_num]['e']
+            f = linformer[self.layer_num]['f']
+            key_layer = torch.einsum('bhnd,nk->bhkd', key_layer, e)
+            value_layer = torch.einsum('bhnd,nk->bhkd', value_layer, f)
+            attention_mask = attention_mask[:,:,:,:e.shape[-1]]
+
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
@@ -241,11 +248,6 @@ class BertSelfAttention(nn.Module):
             # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
             attention_scores = attention_scores + attention_mask
 
-        if linformer[self.layer_num] is not None:
-            attention_scores = torch.einsum('bhnn,nk->bhnk', attention_scores,
-                                            linformer[self.layer_num]['e'])
-            value_layer = torch.einsum('bhnd,nk->bhkd', value_layer,
-                                       linformer[self.layer_num]['f'])
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.Softmax(dim=-1)(attention_scores)

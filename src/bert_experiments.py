@@ -49,11 +49,11 @@ def _evaluate(args, model, valid_loader, linformer=None):
     running_loss = 0.0
     with torch.no_grad():
         for i, batch in enumerate(valid_loader):
-            torch.cuda.synchronize()
             start_time = time.time()
             outputs = model(input_ids=batch['input_ids'].to('cuda'),
                             attention_mask=batch['attention_mask'].to('cuda'),
                             linformer=linformer)
+            torch.cuda.synchronize()
             per_batch_runtimes.append(time.time() - start_time)
             logits = outputs[0]
             one_hot_labels = \
@@ -161,6 +161,13 @@ def main(args):
                                                 max_length=args.max_seq_length,
                                                 truncation=True,
                                                 padding=True)
+    elif args.model == 'roberta':
+        tokenizer = \
+            RobertaTokenizer.from_pretrained('roberta-base',
+                                             cache_dir=args.cache_dir,
+                                             max_length=args.max_seq_length,
+                                             truncation=True,
+                                             padding=True)
     if args.load_from_checkpoint:
         if args.checkpoint_dir is None:
             raise ValueError('No checkpoint dir specified!')
@@ -169,15 +176,18 @@ def main(args):
             model = BertForSequenceClassification.from_pretrained(checkpoint_dir)
         elif args.model == 'distilbert':
             model = DistilBertForSequenceClassification.from_pretrained(checkpoint_dir)
+        elif args.model == 'roberta':
+            model = RobertaForSequenceClassification.from_pretrained(checkpoint_dir)
     else:
         if args.model == 'bert':
-            model = \
-                BertForSequenceClassification.from_pretrained('bert-base-cased',
-                                                              cache_dir=args.cache_dir)
+            model = BertForSequenceClassification.from_pretrained(
+                    'bert-base-cased', cache_dir=args.cache_dir)
         elif args.model == 'distilbert':
-            model = \
-                DistilBertForSequenceClassification.from_pretrained('distilbert-base-cased',
-                                                                    cache_dir=args.cache_dir)
+            model = DistilBertForSequenceClassification.from_pretrained(
+                    'distilbert-base-cased', cache_dir=args.cache_dir)
+        elif args.model == 'roberta':
+            model = RobertaForSequenceClassification.from_pretrained(
+                    'roberta-base', cache_dir=args.cache_dir)
     model.to('cuda')
 
     if args.task == 'mrpc':
@@ -241,7 +251,7 @@ def main(args):
 if __name__=='__main__':
     parser = argparse.ArgumentParser(
         description='Approximate HuggingFace (Distil)Bert')
-    parser.add_argument('--model', choices=['bert', 'distilbert'],
+    parser.add_argument('--model', choices=['bert', 'distilbert', 'roberta'],
                         required=True, help='Model to run')
     parser.add_argument('--task', required=True, type=str,
                         choices=['cola', 'mrpc', 'sst-2', 'qqp', 'qnli', 'rte',
