@@ -229,10 +229,14 @@ def main(args):
     if not args.eval:
         train(args, model, train_loader, valid_loader, linformer=linformer)
         if args.save_to_checkpoint:
-            if args.checkpoint_dir is None:
-                raise ValueError('No checkpoint dir specified!')
+            if args.save_checkpoint_dir is not None:
+                save_checkpoint_dir = args.save_checkpoint_dir
+                if not os.path.isdir(save_checkpoint_dir):
+                    os.mkdir(checkpoint_dir)
+            else:
+                save_checkpoint_dir = checkpoint_dir
             print('===> Saving to checkpoint...')
-            model.save_pretrained(checkpoint_dir)
+            model.save_pretrained(save_checkpoint_dir)
 
     valid_acc, valid_loss, all_correct, per_batch_runtimes = \
         evaluate(args, model, valid_loader, warm_up=True, profile=True,
@@ -297,5 +301,7 @@ if __name__=='__main__':
                         help='Maximum sequence length')
     parser.add_argument('--valid_acc_target', type=float, default=None,
                         help='If set, break if validation accuracy hits target')
+    parser.add_argument('--save_checkpoint_dir', type=str, default=None,
+                        help='Directory to save checkpoint to')
     args = parser.parse_args()
     main(args)

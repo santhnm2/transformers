@@ -6,28 +6,39 @@ num_trials = 10
 
 h = 12
 d = 64
-k = 128
+k = 256
+
+def _transpose_for_scores(x, h):
+    x = x.reshape(x.shape[0], x.shape[1], h, x.shape[-1] // h)
+    x = x.permute(0, 2, 1, 3)
+    return x
 
 def experiment(b, h, n, d, k):
-    Q = torch.randn((b, h, n, d)).cuda()
-    K = torch.randn((b, h, n, d)).cuda()
-    V = torch.randn((b, h, n, d)).cuda()
+    x = torch.randn((b, n, d * h)).cuda()
+    query_layer = torch.nn.Linear(d * h, d * h).cuda()
+    key_layer = torch.nn.Linear(d * h, d * h).cuda()
+    value_layer = torch.nn.Linear(d * h, d * h).cuda()
     E = torch.randn((n, k)).cuda()
-    softmax = torch.nn.Softmax(dim=-1)
+    softmax = torch.nn.Softmax(dim=-1).cuda()
 
-    mask = torch.randint(low=0, high=1, size=(b, n)).cuda()
-    mask_reshp = (b, 1, 1, n)
     times = []
+
     for i in range(num_trials):
         start = time.time()
+        Q = query_layer(x)
+        K = key_layer(x)
+        V = value_layer(x)
+
+        Q = _transpose_for_scores(Q, h)
+        K = _transpose_for_scores(K, h)
+        V = _transpose_for_scores(V, h)
+
         scores = torch.matmul(Q, K.transpose(2, 3))
-        mask_ = (mask == 0).view(mask_reshp).expand_as(scores)
-        scores.masked_fill_(mask_, -1e10)
+        scores = torch.div(scores, np.sqrt(d))
         weights = softmax(scores)
         torch.matmul(weights, V)
         torch.cuda.synchronize()
         times.append(time.time() - start)
-        del mask_
     original_time = np.median(times) * 1000
 
     torch.cuda.empty_cache()
@@ -36,17 +47,22 @@ def experiment(b, h, n, d, k):
     times = []
     for i in range(num_trials):
         start = time.time()
+        Q = query_layer(x)
+        K = key_layer(x)
+        V = value_layer(x)
+
+        Q = _transpose_for_scores(Q, h)
+        K = _transpose_for_scores(K, h)
+        V = _transpose_for_scores(V, h)
+
         linformer_K = torch.einsum('bhnd,nk->bhkd', K, E)
         linformer_V = torch.einsum('bhnd,nk->bhkd', V, E)
+
         scores = torch.matmul(Q, linformer_K.transpose(2, 3))
-        mask_ = mask[:, :k]
-        mask_ = (mask_ == 0).view(mask_reshp).expand_as(scores)
-        scores.masked_fill_(mask_, -1e10)
         weights = softmax(scores)
         torch.matmul(weights, linformer_V)
         torch.cuda.synchronize()
         times.append(time.time() - start)
-        del mask_
     linformer_time = np.median(times) * 1000
 
     del Q
